@@ -48,6 +48,7 @@ type state struct {
 	maxLineWidth int
 	currentBytes float64
 	finished     bool
+	valid        bool
 }
 
 type config struct {
@@ -62,6 +63,9 @@ type config struct {
 	// whether the output is expected to contain color codes
 	colorCodes bool
 	maxBytes   int64
+
+	//force render on Add
+	forceRender bool
 
 	// show rate of change in kB/sec or MB/sec
 	showBytes bool
@@ -189,6 +193,14 @@ func OptionShowBytes(val bool) Option {
 	}
 }
 
+// OptionForceRender will make the bar update
+// whenever a value is added with Add
+func OptionForceRender() Option {
+	return func(p *ProgressBar) {
+		p.config.forceRender = true
+	}
+}
+
 var defaultTheme = Theme{Saucer: "█", SaucerPadding: " ", BarStart: "|", BarEnd: "|"}
 
 // NewOptions constructs a new instance of ProgressBar, with any options you specify
@@ -222,8 +234,11 @@ func NewOptions64(max int64, options ...Option) *ProgressBar {
 	}
 
 	if b.config.renderWithBlankState {
+		//b.state.valid = true
 		b.RenderBlank()
 	}
+
+	go rendererWorker(&b)
 
 	return &b
 }
@@ -245,7 +260,7 @@ func New(max int) *ProgressBar {
 
 // RenderBlank renders the current bar state, you can use this to render a 0% state
 func (p *ProgressBar) RenderBlank() error {
-	return p.render()
+	return p.Render()
 }
 
 // Reset will reset the clock that is used
@@ -255,6 +270,7 @@ func (p *ProgressBar) Reset() {
 	defer p.lock.Unlock()
 
 	p.state = getBasicState()
+	p.Invalidate()
 }
 
 // Finish will fill the bar to full
@@ -288,8 +304,13 @@ func (p *ProgressBar) Add64(num int64) error {
 	p.lock.Lock()
 	defer p.lock.Unlock()
 
+	//FIXME: not sure if this should be here
 	if p.config.max == 0 {
 		return errors.New("max must be greater than 0")
+	}
+	//FIXME: not sure if this should be here
+	if num > p.config.max-p.state.currentNum {
+		return errors.New("current number exceeds max")
 	}
 
 	if p.config.ignoreLength {
@@ -313,18 +334,11 @@ func (p *ProgressBar) Add64(num int64) error {
 
 	percent := float64(p.state.currentNum) / float64(p.config.max)
 	p.state.currentSaucerSize = int(percent * float64(p.config.width))
-	p.state.currentPercent = int(percent * 100)
-	updateBar := p.state.currentPercent != p.state.lastPercent && p.state.currentPercent > 0
-
 	p.state.lastPercent = p.state.currentPercent
-	if p.state.currentNum > p.config.max {
-		return errors.New("current number exceeds max")
-	}
+	p.state.currentPercent = int(percent * 100)
 
-	// always update if show bytes/second or its/second
-	if updateBar || p.config.showIterationsPerSecond || p.config.maxBytes > 0 {
-		return p.render()
-	}
+	// check if re-render is needed
+	p.Invalidate()
 
 	return nil
 }
@@ -356,10 +370,50 @@ func (p *ProgressBar) GetMax64() int64 {
 	return p.config.max
 }
 
+// Indicates if render state of this bar
+// is in sync with its data
+func (p *ProgressBar) Valid() bool {
+	var percentChanged bool = p.state.currentPercent != p.state.lastPercent && p.state.currentPercent > 0
+
+	// always update if show bytes/second or its/second
+	return !(p.config.forceRender || percentChanged || p.config.showIterationsPerSecond || p.config.maxBytes > 0)
+}
+
+// Invalidates this bar's render state
+func (p *ProgressBar) Invalidate() {
+	//check if the progress bar is valid
+	p.state.valid = p.Valid()
+
+	// check if the progress bar is finished
+	if !p.state.finished {
+		//check is the progress bar must finish
+		if p.state.currentNum >= p.config.max {
+			p.state.finished = true
+
+			if p.config.onCompletion != nil {
+				p.config.onCompletion()
+			}
+		}
+	}
+}
+
+// Worker that renders a bar
+// p: bar to render
+func rendererWorker(p *ProgressBar) {
+	for {
+		p.lock.Lock()
+		if !p.state.valid {
+			p.Render()
+			p.state.valid = true
+		}
+		p.lock.Unlock()
+	}
+}
+
 // render renders the progress bar, updating the maximum
 // rendered line width. this function is not thread-safe,
 // so it must be called with an acquired lock.
-func (p *ProgressBar) render() error {
+func (p *ProgressBar) Render() error {
 	// make sure that the rendering is not happening too quickly
 	// but always show if the currentNum reaches the max
 	if time.Since(p.state.lastShown).Nanoseconds() < p.config.throttleDuration.Nanoseconds() &&
@@ -367,38 +421,25 @@ func (p *ProgressBar) render() error {
 		return nil
 	}
 
-	// first, clear the existing progress bar
 	err := clearProgressBar(p.config, p.state)
 	if err != nil {
 		return err
 	}
 
-	// check if the progress bar is finished
-	if !p.state.finished && p.state.currentNum >= p.config.max {
-		p.state.finished = true
-		if !p.config.clearOnFinish {
-			renderProgressBar(p.config, p.state)
+	if !p.state.finished || !p.config.clearOnFinish {
+		// re-render the current progress bar
+		w, err := renderProgressBar(p.config, p.state)
+		if err != nil {
+			return err
 		}
 
-		if p.config.onCompletion != nil {
-			p.config.onCompletion()
+		if w > p.state.maxLineWidth {
+			p.state.maxLineWidth = w
 		}
-	}
-	if p.state.finished {
-		return nil
-	}
 
-	// then, re-render the current progress bar
-	w, err := renderProgressBar(p.config, p.state)
-	if err != nil {
-		return err
-	}
+		p.state.lastShown = time.Now()
 
-	if w > p.state.maxLineWidth {
-		p.state.maxLineWidth = w
 	}
-
-	p.state.lastShown = time.Now()
 
 	return nil
 }

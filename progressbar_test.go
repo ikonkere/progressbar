@@ -79,6 +79,7 @@ func ExampleOptionClearOnFinish() {
 func ExampleProgressBar_Finish() {
 	bar := NewOptions(100, OptionSetWidth(10), OptionSetRenderBlankState(false))
 	bar.Finish()
+	time.Sleep(1 * time.Second)
 	// Output:
 	// 100% |██████████|  [0s:0s]
 }
@@ -115,6 +116,7 @@ func ExampleOptionShowItsSlow() {
 	bar.Reset()
 	time.Sleep(4 * time.Second)
 	bar.Add(1)
+	time.Sleep(1 * time.Second)
 	// Output:
 	// 1% |          | (15 it/min) [4s:6m36s]
 }
@@ -122,6 +124,7 @@ func ExampleOptionShowItsSlow() {
 func ExampleOptionSetPredictTime() {
 	bar := NewOptions(100, OptionSetWidth(10), OptionSetPredictTime(false))
 	_ = bar.Add(10)
+	time.Sleep(1 * time.Second)
 	// Output:
 	// 10% |█         |  [10:100]
 }
@@ -138,6 +141,7 @@ func ExampleIgnoreLength_WithIteration() {
 	bar.Reset()
 	time.Sleep(1 * time.Second)
 	bar.Add(5)
+	time.Sleep(1 * time.Second)
 
 	// Output:
 	// 50% |    █     | (5/-, 5 it/s)
@@ -358,6 +362,124 @@ func TestConcurrency(t *testing.T) {
 	result := bar.state.currentNum
 	expect := int64(900)
 	assert.Equal(t, expect, result)
+}
+
+func TestForceRender(t *testing.T) {
+	buf := strings.Builder{}
+	bar := NewOptions(
+		1000,
+		OptionSetWidth(10),
+		OptionSetWriter(&buf),
+		OptionForceRender(),
+		OptionSetPredictTime(false),
+	)
+
+	_ = bar.Add(2)
+	time.Sleep(1 * time.Second)
+	result := strings.TrimSpace(buf.String())
+	expect := "0% |          |  [2:1000]"
+
+	if result != expect {
+		t.Errorf("Render miss-match\nResult: '%s'\nExpect: '%s'\n%+v", result, expect, bar)
+	}
+}
+
+func TestBoundary(t *testing.T) {
+	buf := strings.Builder{}
+	var onCompleted bool
+
+	bar := NewOptions(
+		10,
+		OptionSetWidth(10),
+		OptionSetWriter(&buf),
+		OptionSetPredictTime(false),
+		OptionClearOnFinish(),
+		OptionOnCompletion(func() {
+			onCompleted = true
+		}),
+	)
+
+	_ = bar.Add(9)
+	time.Sleep(1 * time.Second)
+
+	_ = bar.Add(1)
+	time.Sleep(1 * time.Second)
+
+	result := buf.String()
+	expect := "                          "
+
+	if !onCompleted {
+		t.Error()
+	}
+
+	if result != expect {
+		t.Errorf("Render miss-match\nResult: '%s'\nExpect: '%s'\n%+v", result, expect, bar)
+	}
+}
+
+func TestFinish(t *testing.T) {
+	buf := strings.Builder{}
+
+	bar := NewOptions(
+		10,
+		OptionSetWidth(10),
+		OptionSetWriter(&buf),
+		OptionSetPredictTime(false),
+	)
+
+	_ = bar.Finish()
+	time.Sleep(1 * time.Second)
+
+	result := strings.TrimSpace(buf.String())
+	expect := "100% |██████████|  [10:10]"
+
+	if result != expect {
+		t.Errorf("Render miss-match\nResult: '%s'\nExpect: '%s'\n%+v", result, expect, bar)
+	}
+}
+
+func TestAddExcess(t *testing.T) {
+	buf := strings.Builder{}
+
+	bar := NewOptions(
+		10,
+		OptionSetWidth(10),
+		OptionSetWriter(&buf),
+		OptionSetPredictTime(false),
+	)
+
+	_ = bar.Add(9)
+	time.Sleep(1 * time.Second)
+
+	_ = bar.Add(8)
+	time.Sleep(1 * time.Second)
+
+	result := strings.TrimSpace(buf.String())
+	expect := "100% |██████████|  [10:10]"
+
+	if result != expect {
+		t.Errorf("Render miss-match\nResult: '%s'\nExpect: '%s'\n%+v", result, expect, bar)
+	}
+
+}
+
+func ExampleMultiple() {
+	bar1 := NewOptions(
+		1000,
+		OptionSetWidth(10),
+	)
+
+	bar1.Finish()
+
+	bar2 := NewOptions(
+		666,
+		OptionSetWidth(10),
+		OptionSetPredictTime(false),
+	)
+
+	fmt.Println("PIZDA")
+
+	bar2.Finish()
 }
 
 func md5sum(r io.Reader) (string, error) {
